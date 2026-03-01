@@ -1,6 +1,6 @@
 """
 FaceSync — AI-Enabled Attendance System Backend
-FastAPI + face_recognition + SQLite
+FastAPI + DeepFace + SQLite
 """
 
 import io
@@ -11,8 +11,8 @@ from datetime import datetime, date
 from typing import Optional
 
 import cv2
-import face_recognition
 import numpy as np
+from deepface import DeepFace
 from fastapi import FastAPI, File, Form, UploadFile, Depends, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -36,8 +36,8 @@ app.add_middleware(
 UPLOAD_DIR = os.path.join(os.path.dirname(__file__), "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Confidence threshold for face matching
-MATCH_THRESHOLD = 0.6  # Lower distance = better match
+# Confidence threshold for face matching (cosine distance, lower = better match)
+MATCH_THRESHOLD = 0.4  # Facenet default
 
 # Track which students already marked today per class to prevent duplicates
 _session_tracker: dict[str, set[str]] = {}
@@ -80,19 +80,15 @@ async def register_student(
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image file")
 
-    # Convert BGR to RGB for face_recognition
-    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    # Detect faces and get embeddings
-    face_locations = face_recognition.face_locations(rgb_img)
-    if len(face_locations) == 0:
+    # Detect faces and get embeddings (DeepFace accepts BGR from OpenCV)
+    objs = DeepFace.represent(img, model_name="Facenet", enforce_detection=True, detector_backend="opencv")
+    if len(objs) == 0:
         raise HTTPException(status_code=400, detail="No face detected in the photo. Please upload a clear face photo.")
 
-    if len(face_locations) > 1:
+    if len(objs) > 1:
         raise HTTPException(status_code=400, detail="Multiple faces detected. Please upload a photo with only one face.")
 
-    face_encodings = face_recognition.face_encodings(rgb_img, face_locations)
-    embedding = face_encodings[0].tolist()
+    embedding = objs[0]["embedding"]
 
     # Save photo
     photo_filename = f"{uuid.uuid4()}.jpg"
@@ -159,14 +155,12 @@ async def mark_attendance(
     if img is None:
         raise HTTPException(status_code=400, detail="Invalid image")
 
-    rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-
-    # Detect faces
-    face_locations = face_recognition.face_locations(rgb_img)
-    if len(face_locations) == 0:
+    # Detect faces and get embeddings
+    objs = DeepFace.represent(img, model_name="Facenet", enforce_detection=False, detector_backend="opencv")
+    if len(objs) == 0:
         return {"status": "no_face", "message": "No face detected in frame"}
 
-    face_encodings = face_recognition.face_encodings(rgb_img, face_locations)
+    face_encodings = [o["embedding"] for o in objs]
 
     # Load all student embeddings
     students = db.query(Student).filter(Student.face_embedding.isnot(None)).all()
@@ -190,9 +184,13 @@ async def mark_attendance(
     if session_key not in _session_tracker:
         _session_tracker[session_key] = set()
 
+    def cosine_distance(a, b):
+        a, b = np.array(a, dtype=float), np.array(b, dtype=float)
+        return 1 - np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-10)
+
     for face_encoding in face_encodings:
-        # Compute distances to all known faces
-        distances = face_recognition.face_distance(known_encodings, face_encoding)
+        # Compute cosine distances to all known faces
+        distances = np.array([cosine_distance(enc, face_encoding) for enc in known_encodings])
         best_idx = np.argmin(distances)
         best_distance = distances[best_idx]
 

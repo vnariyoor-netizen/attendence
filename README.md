@@ -1,6 +1,6 @@
 # Attendance
 
-Face recognition attendance system with React frontend and FastAPI backend.
+Face recognition attendance system with React frontend and FastAPI backend. Uses DeepFace (pip install works on any system, no dlib/face_recognition_models).
 
 ## Setup
 
